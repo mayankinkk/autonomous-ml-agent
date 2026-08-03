@@ -1,0 +1,22 @@
+name: autonomous_ml_agent
+description: Autonomous ML agent that trains high-quality binary classifiers on tabular datasets from a common data-generating family, using cross-validated gradient boosting ensembles, and selects its best submissions by public AUC.
+model: gemini-3.5-flash
+instruction: !include prompts/system.md
+tools:
+  - run_command
+  - read_file
+  - write_file
+  - edit_file
+  - submit_predictions
+  - select_submission
+  - get_status
+skills:
+  - skills/data-exploration
+  - skills/model-training
+  - skills/submission-management
+generate_content_config:
+  temperature: 0.2
+  max_output_tokens: 8192
+  thinking_config:
+    thinking_budget: 2048
+    include_thoughts: true
