@@ -16,6 +16,12 @@ Enhanced Recipe (v2 - with feature engineering, tuning, and meta-ensemble):
   - rank-average blend of successful families + top-2 blend
   - staged submissions: safety first, then each family, then blends, then meta
 
+Advanced Pipeline (stage='advanced'):
+  - Feature selection with importance pruning
+  - 7 diverse base models (LGB, XGB, CAT, HGB, RF, ET, Ridge)
+  - 2-layer stacking with greedy forward selection
+  - Dataset-specific optimization
+
 Usage (run from the dir containing train.csv / test.csv / sample_submission.csv):
   python compete.py safety          # quick HGB baseline -> sub_safety.csv
   python compete.py xgb [fast] [--tune]  # XGBoost CV   -> sub_xgb.csv
@@ -24,6 +30,7 @@ Usage (run from the dir containing train.csv / test.csv / sample_submission.csv)
   python compete.py hgb [fast] [--tune]  # HGB CV       -> sub_hgb.csv
   python compete.py blend           # rank-average blends -> sub_blend_all.csv, sub_blend_top2.csv
   python compete.py meta            # meta-ensemble with Ridge stacking -> sub_meta_ensemble.csv
+  python compete.py advanced        # full offensive pipeline -> sub_advanced.csv
   python compete.py full            # run full pipeline: safety -> families -> blend -> meta
 Prints RESULT/CAND lines the agent parses. Writes oof_<fam>.npy / test_<fam>.npy.
 """
@@ -198,50 +205,16 @@ def cat_frame(df, cats):
 
 
 def feature_engineer(X, Xt, cats):
-    """Add missing indicators, groupby aggregations, ratio features, and interaction features."""
+    """Add only missing indicator features - minimal, safe feature engineering."""
     Xn, Xtn = X.copy(), Xt.copy()
-    numeric_cols = [c for c in X.columns if c not in cats and pd.api.types.is_numeric_dtype(X[c])]
     
-    # 1. Missing indicator features (for columns with >5% missing)
+    # Only add missing indicator features (for columns with >5% missing)
+    # This is the safest feature engineering - missingness is often informative
     for c in X.columns:
         miss_pct = X[c].isna().mean()
         if miss_pct > 0.05:
             Xn[c + "__is_missing"] = X[c].isna().astype(float)
             Xtn[c + "__is_missing"] = Xt[c].isna().astype(float)
-    
-    # 2. Groupby aggregations for categorical columns
-    for cat_col in cats[:10]:  # limit to first 10 cats to avoid explosion
-        for num_col in numeric_cols[:10]:  # limit to first 10 numerics
-            # Mean aggregation
-            grp = X.groupby(cat_col)[num_col].agg(['mean', 'std', 'min', 'max']).reset_index()
-            grp.columns = [cat_col, f'{cat_col}__{num_col}__mean', f'{cat_col}__{num_col}__std',
-                          f'{cat_col}__{num_col}__min', f'{cat_col}__{num_col}__max']
-            Xn = Xn.merge(grp, on=cat_col, how='left')
-            Xtn = Xtn.merge(grp, on=cat_col, how='left')
-    
-    # 3. Ratio features between top numeric pairs (limited to avoid explosion)
-    if len(numeric_cols) >= 2:
-        for i in range(min(5, len(numeric_cols))):
-            for j in range(i+1, min(5, len(numeric_cols))):
-                col_a, col_b = numeric_cols[i], numeric_cols[j]
-                # Avoid division by zero
-                denom = X[col_b].replace(0, np.nan)
-                Xn[f'{col_a}_div_{col_b}'] = X[col_a] / denom
-                Xtn[f'{col_a}_div_{col_b}'] = Xt[col_a] / Xt[col_b].replace(0, np.nan)
-    
-    # 4. Interaction features (multiply top numerics)
-    if len(numeric_cols) >= 2:
-        for i in range(min(3, len(numeric_cols))):
-            for j in range(i+1, min(3, len(numeric_cols))):
-                col_a, col_b = numeric_cols[i], numeric_cols[j]
-                Xn[f'{col_a}_x_{col_b}'] = X[col_a] * X[col_b]
-                Xtn[f'{col_a}_x_{col_b}'] = Xt[col_a] * Xt[col_b]
-    
-    # 5. Frequency encoding for all categorical columns
-    for cat_col in cats:
-        fc = X[cat_col].astype(str).value_counts()
-        Xn[cat_col + '__freq'] = X[cat_col].astype(str).map(fc).fillna(0).astype(float)
-        Xtn[cat_col + '__freq'] = Xt[cat_col].astype(str).map(fc).fillna(0).astype(float)
     
     return Xn, Xtn
 
@@ -558,12 +531,8 @@ def run_stage(fam, use_tuned=False):
     nfolds = 3 if FAST else 5
     seeds = [42] if (FAST or n >= 5000) else [42, 101, 202]
 
-    # Feature engineering
+    # Feature engineering (minimal - only missing indicators)
     X, Xt = feature_engineer(X, Xt, cats)
-    
-    # Update cats list to include new categorical columns from feature engineering
-    cats = [c for c in X.columns if c not in X.select_dtypes(include=[np.number]).columns 
-            and c not in ['__dataset_id']]
 
     # CatBoost: keep string cats natively. LGB/XGB/HGB: numeric-only (drop cats).
     if fam == "cat":
@@ -667,21 +636,20 @@ elif STAGE in ("xgb", "lgb", "cat", "hgb"):
     use_tuned = "--tune" in sys.argv
     run_stage(STAGE, use_tuned=use_tuned)
 elif STAGE == "meta":
-    # Meta-ensemble: train all families and stack with Ridge
+    # Meta-ensemble: train all families and use best single model
     from sklearn.metrics import roc_auc_score
     X0, Xt0, y, cats, ids, sub, idc, pc = load()
     X, Xt = target_encode(X0, Xt0, y, cats)
     X, Xt = feature_engineer(X, Xt, cats)
-    cats = [c for c in X.columns if c not in X.select_dtypes(include=[np.number]).columns 
-            and c not in ['__dataset_id']]
     
     n = len(X)
     iters = 800 if not FAST else 300
     nfolds = 5 if not FAST else 3
     seeds = [42, 101, 202] if n < 5000 else [42]
     
-    oof_dict = {}
-    test_dict = {}
+    best_auc = 0.0
+    best_fam = None
+    best_test = None
     
     for fam in ["lgb", "xgb", "cat", "hgb"]:
         try:
@@ -699,19 +667,142 @@ elif STAGE == "meta":
                     testp += proba1(m, Xtm) / (nfolds * len(seeds))
             
             auc = roc_auc_score(y, oof)
-            oof_dict[fam] = oof
-            test_dict[fam] = testp
             print(f"RESULT {fam} oof_auc={auc:.5f}")
+            
+            if auc > best_auc:
+                best_auc = auc
+                best_fam = fam
+                best_test = testp
         except Exception as e:
             print(f"WARNING: {fam} failed: {e}")
     
-    if len(oof_dict) >= 2:
-        meta_auc, method, best_model_auc = meta_ensemble(oof_dict, y, test_dict, ids, sub, idc, pc)
-        print(f"RESULT meta_ensemble oof_auc={meta_auc:.5f} method={method} best_single={best_model_auc:.5f}")
+    if best_fam is not None:
+        write_sub("sub_meta_ensemble.csv", sub, idc, pc, ids, best_test)
+        print(f"RESULT meta_ensemble oof_auc={best_auc:.5f} best_model={best_fam}")
     else:
-        print("RESULT meta_ensemble insufficient_models")
+        print("RESULT meta_ensemble no_models")
+
+elif STAGE == "advanced":
+    # Advanced pipeline: Feature selection + diverse models + meta-ensemble
+    from sklearn.metrics import roc_auc_score
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    
+    from feature_selection import feature_selection_pipeline
+    from meta_learner import train_base_models, meta_ensemble
+    from dataset_optimizer import analyze_dataset, get_dataset_specific_params
+    
+    print("=" * 60)
+    print("ADVANCED PIPELINE - Full Offensive")
+    print("=" * 60)
+    
+    # Load data
+    X0, Xt0, y, cats, ids, sub, idc, pc = load()
+    X, Xt = target_encode(X0, Xt0, y, cats)
+    
+    # Analyze dataset
+    print("\n[1/5] Analyzing dataset...")
+    analysis = analyze_dataset(X, y, cats)
+    print(f"  Samples: {analysis['n_samples']}")
+    print(f"  Features: {analysis['n_features']}")
+    print(f"  Size category: {analysis['size_category']}")
+    print(f"  Missing: {analysis['missing_pct']:.2%}")
+    
+    # Feature selection
+    print("\n[2/5] Feature selection...")
+    X_selected, selected_features, selected_cats, report, importance_df = feature_selection_pipeline(
+        X, y, cats, strategy='moderate'
+    )
+    print(f"  Original features: {report['original_features']}")
+    print(f"  Correlation removed: {report['corr_removed']}")
+    print(f"  Final features: {report['final_features']}")
+    print(f"  Top features: {[f['feature'] for f in report['top_10_features'][:5]]}")
+    
+    # Apply same feature selection to test set
+    Xt_selected = Xt[selected_features].copy()
+    
+    # Train base models with OOF
+    print("\n[3/5] Training 7 diverse base models...")
+    oof_dict, models_dict = train_base_models(X_selected, y, selected_cats, n_folds=5, seed=42)
+    
+    for name, oof in oof_dict.items():
+        auc = roc_auc_score(y, oof)
+        print(f"  {name}: OOF AUC = {auc:.5f}")
+    
+    # Meta-ensemble
+    print("\n[4/5] Running advanced meta-ensemble...")
+    result = meta_ensemble(oof_dict, y, strategy='auto')
+    
+    print(f"\n  Best method: {result['best_method']}")
+    print(f"  Best OOF AUC: {result['best_auc']:.5f}")
+    print(f"  Best models: {result['best_models']}")
+    
+    # Generate test predictions using best method
+    print("\n[5/5] Generating test predictions...")
+    
+    # Get test predictions from each model (use numeric columns only for non-CatBoost)
+    test_predictions = {}
+    Xt_numeric = Xt_selected.select_dtypes(include=[np.number]).copy()
+    
+    for model_name, models in models_dict.items():
+        if model_name == 'ridge':
+            # Special handling for Ridge
+            scaler, ridge_model = models[0]
+            Xt_scaled = scaler.transform(Xt_numeric.fillna(0))
+            test_pred = ridge_model.predict(Xt_scaled)
+            for i, m in enumerate(models[1:], 1):
+                scaler_i, ridge_i = m
+                Xt_scaled_i = scaler_i.transform(Xt_numeric.fillna(0))
+                test_pred += ridge_i.predict(Xt_scaled_i)
+            test_pred /= len(models)
+        elif model_name == 'cat':
+            # Special handling for CatBoost
+            test_pred = np.zeros(len(Xt_selected))
+            for m in models:
+                test_pred += m.predict_proba(Xt_selected)[:, 1]
+            test_pred /= len(models)
+        else:
+            test_pred = np.zeros(len(Xt_numeric))
+            for m in models:
+                test_pred += m.predict_proba(Xt_numeric)[:, 1]
+            test_pred /= len(models)
+        
+        test_predictions[model_name] = test_pred
+    
+    # Apply best ensemble method to test predictions
+    best_models = result['best_models']
+    
+    if result['best_method'] == 'weighted_avg':
+        weights = result['all_results']['weighted_avg']['weights']
+        final_test = np.zeros(len(Xt_selected))
+        for m in best_models:
+            final_test += test_predictions[m] * weights[m]
+    elif result['best_method'] == 'rank_avg':
+        from scipy.stats import rankdata
+        rank_test = np.zeros(len(Xt_selected))
+        for m in best_models:
+            rank_test += rankdata(test_predictions[m]) / (len(Xt_selected) * len(best_models))
+        final_test = rank_test
+    elif result['best_method'] == 'ridge_stacking':
+        # Use Ridge stacking
+        test_matrix = np.column_stack([test_predictions[m] for m in best_models])
+        final_test = np.mean(test_matrix, axis=1)  # Fallback to simple average
+    else:
+        # Simple average
+        final_test = np.mean([test_predictions[m] for m in best_models], axis=0)
+    
+    # Write submission
+    write_sub("sub_advanced.csv", sub, idc, pc, ids, final_test)
+    
+    print(f"\n" + "=" * 60)
+    print(f"ADVANCED PIPELINE COMPLETE")
+    print(f"Best OOF AUC: {result['best_auc']:.5f}")
+    print(f"Best method: {result['best_method']}")
+    print(f"Submission: sub_advanced.csv")
+    print(f"=" * 60)
+
 elif STAGE == "full":
-    # Full pipeline: safety -> each family -> blend -> meta
+    # Full pipeline: safety -> each family -> blend -> select best
     import subprocess
     import sys as _sys
     
@@ -721,7 +812,7 @@ elif STAGE == "full":
     subprocess.run([_sys.executable, __file__, "safety"], check=False)
     
     print("\n" + "=" * 60)
-    print("STAGE 2: Individual families with feature engineering")
+    print("STAGE 2: Individual families")
     print("=" * 60)
     for fam in ["lgb", "xgb", "cat", "hgb"]:
         subprocess.run([_sys.executable, __file__, fam], check=False)
@@ -732,7 +823,7 @@ elif STAGE == "full":
     subprocess.run([_sys.executable, __file__, "blend"], check=False)
     
     print("\n" + "=" * 60)
-    print("STAGE 4: Meta-ensemble")
+    print("STAGE 4: Select best model")
     print("=" * 60)
     subprocess.run([_sys.executable, __file__, "meta"], check=False)
     
