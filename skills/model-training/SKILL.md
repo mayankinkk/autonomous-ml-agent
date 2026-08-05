@@ -15,7 +15,14 @@ Use this skill after data exploration, once the target column and feature types 
 
 ## Available Scripts
 
-### `scripts/compete.py` (PREFERRED default - run this FIRST)
+### `scripts/aggressive.py` (HIGHEST AUC - run this FIRST)
+Maximum AUC pipeline with aggressive feature engineering (log/sqrt/rank transforms, interactions, row aggregates, z-scores, binned features), all 4 model families (LGB/XGB/CAT/HGB) with 5-fold CV and 3 seeds each, optimized weighted blending via scipy, and ridge stacking. Writes `submission.csv` (best), `sub_blend_optimized.csv`, `sub_ridge_stacking.csv`, `sub_ridge_rank_stacking.csv`, plus per-family `sub_*.csv`.
+
+```
+python skills/model-training/scripts/aggressive.py
+```
+
+### `scripts/compete.py` (fallback - if aggressive.py fails)
 Stage-dispatched implementation of the strongest known recipe for this family. One script, staged execution:
 
 ```

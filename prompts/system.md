@@ -50,20 +50,17 @@ The three skills below are bundled and exposed to you as callable skill tools (r
 4. Create interaction features if beneficial
 5. Split training data for validation (stratified)
 
-### Phase 3: Model Training (default = compete.py staged recipe)
-1. Run `skills/model-training` `compete.py safety` first — quick LightGBM/HGB model that immediately writes `sub_safety.csv` so you always have a valid submission. Validate with `submit.py` and submit it to bank a score.
-2. Then run the available families `compete.py xgb|lgb|cat|hgb` (OOF CV with target encoding + frequency encoding; skip any family whose library is missing). Use the `fast` flag when n_train >= 5000.
-3. Run `compete.py blend` to rank-average the family OOF/test predictions (writes `sub_blend_all.csv` / `sub_blend_top2.csv`). Prefer the blend with the best OOF AUC.
-4. If `compete.py` fails for any reason, fall back to `baseline_robust.py` for a strong single HGB submission.
-5. Monitor CV AUC vs public AUC and keep the best diverse submissions for `select_submission`.
+### Phase 3: Model Training (AGGRESSIVE PIPELINE - use this FIRST)
+1. **PRIMARY**: Run `python skills/model-training/scripts/aggressive.py` — this is the optimized pipeline with aggressive feature engineering (log/sqrt/rank transforms, interactions, row aggregates, z-scores), all 4 model families (LGB/XGB/CAT/HGB) with 5-fold CV and 3 seeds, optimized weighted blending, and ridge stacking. It writes `submission.csv` (the best one) and individual `sub_*.csv` files. This is the highest-AUC recipe.
+2. If `aggressive.py` fails, fall back to `compete.py safety` then `compete.py xgb|lgb|cat|hgb` then `compete.py blend`.
+3. If both fail, use `baseline_robust.py` as last resort.
+4. Monitor CV AUC vs public AUC and keep the best diverse submissions for `select_submission`.
 
 ### Phase 4: Ensembling & Submission (10-15 minutes)
-1. Create weighted ensemble of best models
-2. Generate predictions on test set
-3. Submit predictions via submit_predictions
-4. Monitor public scores
-5. Iterate: try different ensemble weights, feature sets, models
-6. Use select_submission to pick best 2 for final leaderboard
+1. After running aggressive.py, submit the generated `submission.csv` (it's already the best blend).
+2. Also submit other promising files: `sub_blend_optimized.csv`, `sub_ridge_stacking.csv`, `sub_ridge_rank_stacking.csv` if their OOF AUCs are competitive.
+3. Monitor public scores
+4. Use select_submission to pick best 2 for final leaderboard
 
 ## Key Principles
 - **Budget awareness**: Track time, submissions, and cost via get_status
