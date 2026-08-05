@@ -2,6 +2,7 @@
 """
 Aggressive pipeline: feature engineering + optimized ensemble + stacking.
 Goal: push from 0.818 to 0.830+ AUC.
+Optimized for minimal LLM overhead - single script execution.
 """
 
 import os, sys, time, warnings
@@ -89,33 +90,26 @@ def aggressive_feature_engineering(X, Xt, cats, y):
     Xn, Xtn = X.copy(), Xt.copy()
     numeric_cols = [c for c in Xn.columns if c not in cats and pd.api.types.is_numeric_dtype(Xn[c])]
 
-    # 1. Missing indicators for ALL columns with any missing
+    # Missing indicators for ALL columns with any missing
     for c in Xn.columns:
         miss_pct = Xn[c].isna().mean()
         if miss_pct > 0.01:
             Xn[c + "__miss"] = Xn[c].isna().astype(float)
             Xtn[c + "__miss"] = Xt[c].isna().astype(float)
 
-    # 2. Log transforms for skewed numeric features
+    # Log transforms for skewed numeric features
     for c in numeric_cols[:50]:
         vals = Xn[c].dropna()
         if len(vals) > 0 and vals.min() >= 0:
             Xn[c + "__log"] = np.log1p(Xn[c])
             Xtn[c + "__log"] = np.log1p(Xt[c])
 
-    # 3. Square root transforms
-    for c in numeric_cols[:30]:
-        vals = Xn[c].dropna()
-        if len(vals) > 0 and vals.min() >= 0:
-            Xn[c + "__sqrt"] = np.sqrt(Xn[c])
-            Xtn[c + "__sqrt"] = np.sqrt(Xt[c])
-
-    # 4. Rank features (robust to outliers)
+    # Rank features (robust to outliers)
     for c in numeric_cols[:30]:
         Xn[c + "__rank"] = Xn[c].rank(pct=True)
         Xtn[c + "__rank"] = Xt[c].rank(pct=True)
 
-    # 5. Binned features for top numeric
+    # Binned features for top numeric
     for c in numeric_cols[:20]:
         try:
             Xn[c + "__bin10"] = pd.qcut(Xn[c], q=10, labels=False, duplicates='drop')
@@ -125,7 +119,7 @@ def aggressive_feature_engineering(X, Xt, cats, y):
         except Exception:
             pass
 
-    # 6. Interaction features (top correlations with target)
+    # Interaction features (top correlations with target)
     if len(numeric_cols) >= 2:
         corrs = {}
         for c in numeric_cols:
@@ -140,12 +134,8 @@ def aggressive_feature_engineering(X, Xt, cats, y):
                 f1, f2 = top_feats[i], top_feats[j]
                 Xn[f"{f1}__x__{f2}"] = Xn[f1] * Xn[f2]
                 Xt[f"{f1}__x__{f2}"] = Xt[f1] * Xt[f2]
-                denom = Xn[f2].replace(0, np.nan)
-                Xn[f"{f1}__div__{f2}"] = Xn[f1] / denom
-                denom_t = Xt[f2].replace(0, np.nan)
-                Xt[f"{f1}__div__{f2}"] = Xt[f1] / denom_t
 
-    # 7. Row-wise aggregations
+    # Row-wise aggregations
     if len(numeric_cols) >= 3:
         top_n = numeric_cols[:min(15, len(numeric_cols))]
         Xn["__row_mean"] = Xn[top_n].mean(axis=1)
@@ -156,12 +146,8 @@ def aggressive_feature_engineering(X, Xt, cats, y):
         Xt["__row_max"] = Xt[top_n].max(axis=1)
         Xn["__row_min"] = Xn[top_n].min(axis=1)
         Xt["__row_min"] = Xt[top_n].min(axis=1)
-        Xn["__row_median"] = Xn[top_n].median(axis=1)
-        Xt["__row_median"] = Xt[top_n].median(axis=1)
-        Xn["__row_skew"] = Xn[top_n].skew(axis=1)
-        Xt["__row_skew"] = Xt[top_n].skew(axis=1)
 
-    # 8. Difference features between top correlated pairs
+    # Difference features between top correlated pairs
     if len(numeric_cols) >= 2:
         for i in range(min(5, len(top_feats))):
             for j in range(i+1, min(8, len(top_feats))):
@@ -169,7 +155,7 @@ def aggressive_feature_engineering(X, Xt, cats, y):
                 Xn[f"{f1}__minus__{f2}"] = Xn[f1] - Xn[f2]
                 Xt[f"{f1}__minus__{f2}"] = Xt[f1] - Xt[f2]
 
-    # 9. Target-guided numeric transforms: z-score per feature
+    # Z-score per feature
     for c in numeric_cols[:30]:
         mu = Xn[c].mean()
         sd = Xn[c].std()
@@ -209,24 +195,24 @@ def write_sub(fname, sub, id_col, pred_col, test_ids, preds):
 def fit_lgb(seed, Xa, ya, Xb, yb):
     import lightgbm as lgbm
     m = lgbm.LGBMClassifier(
-        n_estimators=1200, learning_rate=0.03, num_leaves=63,
+        n_estimators=1000, learning_rate=0.03, num_leaves=63,
         min_child_samples=20, subsample=0.8, subsample_freq=1,
         colsample_bytree=0.7, reg_alpha=0.1, reg_lambda=1.0,
         random_state=seed, n_jobs=-1, verbose=-1
     )
     m.fit(Xa, ya, eval_set=[(Xb, yb)], eval_metric="auc",
-          callbacks=[lgbm.early_stopping(80, verbose=False)])
+          callbacks=[lgbm.early_stopping(60, verbose=False)])
     return m
 
 
 def fit_xgb(seed, Xa, ya, Xb, yb):
     import xgboost as xgbm
     m = xgbm.XGBClassifier(
-        n_estimators=1200, learning_rate=0.03, max_depth=7,
+        n_estimators=1000, learning_rate=0.03, max_depth=7,
         subsample=0.8, colsample_bytree=0.7, min_child_weight=3,
         reg_alpha=0.1, reg_lambda=1.0,
         tree_method="hist", enable_categorical=True, eval_metric="auc",
-        early_stopping_rounds=80, random_state=seed, verbosity=0, n_jobs=-1
+        early_stopping_rounds=60, random_state=seed, verbosity=0, n_jobs=-1
     )
     m.fit(Xa, ya, eval_set=[(Xb, yb)], verbose=False)
     return m
@@ -235,9 +221,9 @@ def fit_xgb(seed, Xa, ya, Xb, yb):
 def fit_cat(seed, Xa, ya, Xb, yb, cats):
     from catboost import CatBoostClassifier
     m = CatBoostClassifier(
-        iterations=1200, learning_rate=0.03, depth=8,
+        iterations=1000, learning_rate=0.03, depth=8,
         l2_leaf_reg=3.0, eval_metric="AUC",
-        cat_features=cats, early_stopping_rounds=80, random_seed=seed,
+        cat_features=cats, early_stopping_rounds=60, random_seed=seed,
         verbose=0, allow_writing_files=False, thread_count=-1
     )
     m.fit(Xa, ya, eval_set=(Xb, yb))
@@ -248,7 +234,7 @@ def fit_hgb(seed, Xa, ya, Xb, yb):
     from sklearn.ensemble import HistGradientBoostingClassifier
     mask = np.zeros(Xa.shape[1], dtype=bool)
     m = HistGradientBoostingClassifier(
-        max_iter=1200, learning_rate=0.03, max_depth=7,
+        max_iter=1000, learning_rate=0.03, max_depth=7,
         min_samples_leaf=20, l2_regularization=1.0,
         random_state=seed, early_stopping=True, categorical_features=mask
     )
@@ -256,10 +242,9 @@ def fit_hgb(seed, Xa, ya, Xb, yb):
     return m
 
 
-def train_family(fam, X, Xt, y, cats, nfolds=5, seeds=[42, 101, 202]):
-    """Train a model family with OOF CV. Returns (oof, test_pred, auc)."""
-    n = len(X)
-    oof = np.zeros(n)
+def train_family(fam, X, Xt, y, cats, nfolds=5, seeds=[42]):
+    """Train a model family with OOF CV."""
+    oof = np.zeros(len(X))
     testp = np.zeros(len(Xt))
     t0 = time.time()
 
@@ -284,12 +269,11 @@ def train_family(fam, X, Xt, y, cats, nfolds=5, seeds=[42, 101, 202]):
 
     auc = roc_auc_score(y, oof)
     elapsed = time.time() - t0
-    print(f"  {fam}: OOF AUC={auc:.5f} ({elapsed:.0f}s, {nfolds}f, {len(seeds)}s)")
+    print(f"  {fam}: OOF AUC={auc:.5f} ({elapsed:.0f}s)")
     return oof, testp, auc
 
 
 def optimize_blend(oof_dict, y):
-    """Find optimal non-negative weights for blending."""
     names = list(oof_dict.keys())
     n_models = len(names)
     mat = np.column_stack([oof_dict[n] for n in names])
@@ -304,7 +288,7 @@ def optimize_blend(oof_dict, y):
         return -roc_auc_score(y, pred)
 
     best_w, best_auc = None, -1
-    for _ in range(20):
+    for _ in range(15):
         x0 = np.random.dirichlet(np.ones(n_models))
         res = minimize(obj, x0, method="Nelder-Mead", options={"maxiter": 2000})
         w = np.maximum(res.x, 0)
@@ -332,11 +316,11 @@ def main():
     X, Xt = target_encode(X0, Xt0, y, cats)
 
     # Aggressive feature engineering
-    print("[2] Aggressive feature engineering...")
+    print("[2] Feature engineering...")
     X, Xt = aggressive_feature_engineering(X, Xt, cats, y)
     print(f"  Features: {X.shape[1]}")
 
-    # Train all families
+    # Train all families - single seed for speed
     print("\n[3] Training model families...")
     families = ["lgb", "xgb", "hgb", "cat"]
     oof_dict = {}
@@ -345,8 +329,7 @@ def main():
 
     for fam in families:
         try:
-            oof, testp, auc = train_family(fam, X, Xt, y, cats,
-                                            nfolds=5, seeds=[42, 101, 202])
+            oof, testp, auc = train_family(fam, X, Xt, y, cats, nfolds=5, seeds=[42])
             oof_dict[fam] = oof
             test_dict[fam] = testp
             aucs[fam] = auc
@@ -360,7 +343,7 @@ def main():
         print("ERROR: Need at least 2 families")
         return
 
-    # Rank-average blend of all
+    # Rank-average blend
     print("\n[4] Blending...")
     all_names = list(oof_dict.keys())
     rank_oof = np.zeros(len(y))
@@ -369,11 +352,9 @@ def main():
         rank_oof += rankdata(oof_dict[n]) / (len(y) * len(all_names))
         rank_test += rankdata(test_dict[n]) / (len(Xt) * len(all_names))
     rank_auc = roc_auc_score(y, rank_oof)
-    print(f"  Rank-avg (all {len(all_names)}): OOF AUC={rank_auc:.5f}")
-    write_sub("sub_blend_all.csv", sub, idc, pc, ids, rank_test)
+    print(f"  Rank-avg: OOF AUC={rank_auc:.5f}")
 
     # Optimized weighted blend
-    print("\n[5] Optimized weighted blend...")
     weights, opt_auc = optimize_blend(oof_dict, y)
     print(f"  Optimized blend: OOF AUC={opt_auc:.5f}")
     print(f"  Weights: {weights}")
@@ -384,12 +365,10 @@ def main():
     write_sub("sub_blend_optimized.csv", sub, idc, pc, ids, weighted_test)
 
     # Ridge stacking
-    print("\n[6] Ridge stacking...")
     from sklearn.linear_model import Ridge
     meta_mat = np.column_stack([oof_dict[n] for n in all_names])
     meta_test_mat = np.column_stack([test_dict[n] for n in all_names])
 
-    # OOF for Ridge stacking
     ridge_oof = np.zeros(len(y))
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     for tr, va in skf.split(meta_mat, y):
@@ -404,7 +383,7 @@ def main():
     write_sub("sub_ridge_stacking.csv", sub, idc, pc, ids, ridge_test)
     print(f"  Ridge stacking: OOF AUC={ridge_auc:.5f}")
 
-    # Also try ridge stacking on rank-transformed predictions
+    # Ridge stacking on rank-transformed predictions
     rank_meta = np.column_stack([rankdata(oof_dict[n]) / len(y) for n in all_names])
     rank_meta_test = np.column_stack([rankdata(test_dict[n]) / len(Xt) for n in all_names])
     ridge_rank_oof = np.zeros(len(y))
@@ -419,8 +398,11 @@ def main():
     write_sub("sub_ridge_rank_stacking.csv", sub, idc, pc, ids, ridge_rank_test)
     print(f"  Ridge rank stacking: OOF AUC={ridge_rank_auc:.5f}")
 
-    # Select best submission
-    print("\n[7] Best submissions:")
+    # Rank-average blend sub
+    write_sub("sub_blend_all.csv", sub, idc, pc, ids, rank_test)
+
+    # Select best
+    print("\n[5] Best submissions:")
     candidates = {
         "sub_blend_optimized.csv": opt_auc,
         "sub_ridge_stacking.csv": ridge_auc,
@@ -435,15 +417,14 @@ def main():
         marker = " <-- BEST" if i == 0 else ""
         print(f"  {i+1}. {fname}: OOF AUC={auc:.5f}{marker}")
 
-    # Copy best to submission.csv for easy submission
-    best_fname = ranked[0][0]
+    # Copy best to submission.csv
     import shutil
+    best_fname = ranked[0][0]
     shutil.copy(best_fname, "submission.csv")
     print(f"\n  -> submission.csv = {best_fname} (OOF AUC={ranked[0][1]:.5f})")
 
     print("\n" + "=" * 60)
     print(f"BEST OOF AUC: {ranked[0][1]:.5f}")
-    print(f"TARGET: 0.830+ (gap: {0.830 - ranked[0][1]:.5f})")
     print("=" * 60)
 
 

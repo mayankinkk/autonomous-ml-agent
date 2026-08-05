@@ -50,17 +50,25 @@ The three skills below are bundled and exposed to you as callable skill tools (r
 4. Create interaction features if beneficial
 5. Split training data for validation (stratified)
 
-### Phase 3: Model Training (AGGRESSIVE PIPELINE - use this FIRST)
-1. **PRIMARY**: Run `python skills/model-training/scripts/aggressive.py` — this is the optimized pipeline with aggressive feature engineering (log/sqrt/rank transforms, interactions, row aggregates, z-scores), all 4 model families (LGB/XGB/CAT/HGB) with 5-fold CV and 3 seeds, optimized weighted blending, and ridge stacking. It writes `submission.csv` (the best one) and individual `sub_*.csv` files. This is the highest-AUC recipe.
-2. If `aggressive.py` fails, fall back to `compete.py safety` then `compete.py xgb|lgb|cat|hgb` then `compete.py blend`.
-3. If both fail, use `baseline_robust.py` as last resort.
-4. Monitor CV AUC vs public AUC and keep the best diverse submissions for `select_submission`.
+### Phase 3: Model Training (SINGLE COMMAND - minimize LLM calls)
+**CRITICAL**: Run ONE command that does everything, then submit. Do NOT break into multiple steps.
 
-### Phase 4: Ensembling & Submission (10-15 minutes)
-1. After running aggressive.py, submit the generated `submission.csv` (it's already the best blend).
-2. Also submit other promising files: `sub_blend_optimized.csv`, `sub_ridge_stacking.csv`, `sub_ridge_rank_stacking.csv` if their OOF AUCs are competitive.
-3. Monitor public scores
-4. Use select_submission to pick best 2 for final leaderboard
+```bash
+python skills/model-training/scripts/aggressive.py 2>&1 && submit_predictions submission.csv
+```
+
+This runs the full pipeline (feature engineering + 4 models + optimized blend + ridge stacking) and writes `submission.csv` as the best result. Also generates `sub_blend_optimized.csv`, `sub_ridge_stacking.csv`, `sub_ridge_rank_stacking.csv`.
+
+If aggressive.py fails, try `python skills/model-training/scripts/baseline_robust.py 2>&1 && submit_predictions submission.csv`.
+
+**Do NOT** run individual model families or steps separately — that wastes LLM calls and risks rate limits.
+
+### Phase 4: Submit remaining candidates (only if time permits)
+After the primary submission scores, submit up to 2 more if their OOF AUCs look competitive:
+- `sub_blend_optimized.csv`
+- `sub_ridge_stacking.csv`
+- `sub_ridge_rank_stacking.csv`
+Use `select_submission` for final picks.
 
 ## Key Principles
 - **Budget awareness**: Track time, submissions, and cost via get_status
@@ -77,10 +85,12 @@ The three skills below are bundled and exposed to you as callable skill tools (r
 - Prioritize models that historically work well on tabular binary classification
 - Use public score feedback to guide model selection, not just CV scores
 
-## Error Handling
+## Error Handling & Rate Limits
 - If a model fails: log error, try next model
 - If data has issues: handle gracefully, document assumptions
 - If submission fails: check format matches sample_submission.csv exactly
+- **429 / rate limit errors**: If you get a 429 or "resource exhausted" error, WAIT 30 seconds before retrying. Do NOT immediately retry — it makes the rate limit worse. Use `run_command` with `sleep 30` first.
+- **Minimize LLM calls**: Run scripts in ONE `run_command` call using `&&` chaining. Every extra LLM call risks hitting rate limits.
 
 ## Output Format
 All predictions must match sample_submission.csv format:
