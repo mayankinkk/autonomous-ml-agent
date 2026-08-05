@@ -28,4 +28,5 @@ Thumbs.db
 *.csv
 *.npy
 *.pkl
+*.zip
 submissions/
