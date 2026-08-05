@@ -50,24 +50,25 @@ The three skills below are bundled and exposed to you as callable skill tools (r
 4. Create interaction features if beneficial
 5. Split training data for validation (stratified)
 
-### Phase 3: Model Training (SINGLE COMMAND - minimize LLM calls)
-**CRITICAL**: Run ONE command that does everything, then submit. Do NOT break into multiple steps.
+### Phase 3: Model Training + Submit (TWO STEPS ONLY)
+**CRITICAL**: Only 2 LLM calls needed. Do NOT break into more steps.
 
+**Step 1** — Run the pipeline (ONE `run_command` call):
 ```bash
-python skills/model-training/scripts/aggressive.py 2>&1 && submit_predictions submission.csv
+python skills/model-training/scripts/aggressive.py
 ```
+This writes `submission.csv` (best blend) plus `sub_blend_optimized.csv`, `sub_ridge_stacking.csv`, `sub_ridge_rank_stacking.csv`.
 
-This runs the full pipeline (feature engineering + 4 models + optimized blend + ridge stacking) and writes `submission.csv` as the best result. Also generates `sub_blend_optimized.csv`, `sub_ridge_stacking.csv`, `sub_ridge_rank_stacking.csv`.
+**Step 2** — Submit the result (call `submit_predictions` tool with file `submission.csv`).
 
-If aggressive.py fails, try `python skills/model-training/scripts/baseline_robust.py 2>&1 && submit_predictions submission.csv`.
+If aggressive.py fails, run `python skills/model-training/scripts/baseline_robust.py` then submit `submission.csv`.
 
-**Do NOT** run individual model families or steps separately — that wastes LLM calls and risks rate limits.
+**Do NOT** run individual model families separately — that wastes LLM calls and risks rate limits.
 
-### Phase 4: Submit remaining candidates (only if time permits)
-After the primary submission scores, submit up to 2 more if their OOF AUCs look competitive:
+### Phase 4: Additional submissions (only if time permits)
+After the primary submission scores, optionally submit up to 2 more:
 - `sub_blend_optimized.csv`
 - `sub_ridge_stacking.csv`
-- `sub_ridge_rank_stacking.csv`
 Use `select_submission` for final picks.
 
 ## Key Principles
