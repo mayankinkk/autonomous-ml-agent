@@ -12,7 +12,7 @@ You must do exactly 2 things, nothing more:
 
 **Step 1**: Run this command:
 ```
-python skills/model-training/scripts/fast_submit.py
+python skills/model-training/scripts/balanced.py
 ```
 
 **Step 2**: Call the `submit_predictions` tool with file `submission.csv`.
